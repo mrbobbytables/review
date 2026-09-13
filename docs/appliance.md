@@ -75,6 +75,12 @@ Published tags:
 | `stable` | Moving alias for the newest published build. |
 | `sha-<commit>` | Immutable, published for every build including branches. |
 
+The OCI image and the release SIF are replaced, never updated in place. The
+appliance disables omp's startup update check, and `omp update` at the appliance
+entrypoint exits with instructions to pull a newer image or download a newer
+SIF. This keeps the version printed by the running artifact identical to the
+version that was verified and published.
+
 ## Running it
 
 State lives under `/home/bluefin`: sessions, logs, caches, the model credential,
@@ -102,6 +108,14 @@ podman run --rm -it \
 `just review-appliance` passes `GH_TOKEN`, `GITHUB_TOKEN`, `COPILOT_GITHUB_TOKEN`,
 `GITHUB_COPILOT_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `HIVE_HUB`
 through by name, and resolves `GH_TOKEN` from `gh auth token` when it is unset.
+
+The appliance uses its own `bluefin-review-appliance` omp profile. In
+particular, an Apptainer launch does not inherit MCP servers from a host omp
+profile, so host entries that depend on binaries absent from the distroless SIF
+cannot make startup noisy or unusable. Missing optional MCPs are therefore not
+startup requirements. To deliberately reuse the host `review` profile,
+including its MCP configuration, set `BLUEFIN_REVIEW_INHERIT_OMP_CONFIG=1` for
+that invocation. The appliance never edits the host configuration.
 
 ### The agents it carries
 
@@ -146,13 +160,10 @@ The loop is narrow, select, dispatch, and it is three keys:
 3. `s` dispatches the slice. Issues become one pull request each; pull requests
    get the landing pass.
 
-A dispatched slice is worked **concurrently clumped by repository** — one agent
-per repository lane, not one agent per item or one item per turn, so multiple
-agents do not race or conflict on the same branch. Each repository agent reviews
-and prepares its repository's items, and `k3-final-review` consolidates and
-lands all changes in one pull request per repository. Twenty-five is the ceiling
-because the wave is real concurrency across repositories, not a longer list.
-
+A dispatched slice is worked concurrently across items up to the subagent
+concurrency ceiling, and each repository lane consolidates and lands changes
+cleanly. Twenty-five is the selection ceiling because the wave is real
+concurrency across items, not an unbounded list.
 The detail pane names the contributor whose worker holds an item right now, from
 Hive's live contributor state. Two people burning the same queue down do not
 need to negotiate; they can see what is already taken.
