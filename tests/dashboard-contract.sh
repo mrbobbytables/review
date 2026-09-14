@@ -341,6 +341,7 @@ python3 "$repo_root/tests/review_cache_contract.py"
 python3 "$repo_root/tests/review_receipt_contract.py"
 python3 "$repo_root/tests/lab-broker-contract.py"
 python3 "$repo_root/tests/review-exec-broker-contract.py"
+python3 "$repo_root/tests/broker_client_contract.py"
 
 # --- behaviour: drive the real app -------------------------------------------
 # Textual at the version the image installs, from the same hash-locked file the
