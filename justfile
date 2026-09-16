@@ -231,6 +231,10 @@ check_image_compatibility() {
     fi
     return 0
   }
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: ${product} image ${ref} has malformed version label '${version}'; expected numeric MAJOR.MINOR.PATCH." >&2
+    return 1
+  fi
   local ver_series="${version%.*}"
   if [[ "$ver_series" != "$EXPECTED_IMAGE_SERIES" ]]; then
     if [[ "$is_override" -eq 1 ]]; then
@@ -252,6 +256,27 @@ check_image_compatibility() {
     fi
   fi
   return 0
+}
+migrate_legacy_state() {
+  local legacy_dir="$1" target_home="$2" sif_name="$3"
+  [[ -d "$legacy_dir" ]] || return 0
+  [[ -d "$target_home" ]] || return 0
+  local item base migrated=0
+  for item in "$legacy_dir"/* "$legacy_dir"/.*; do
+    [[ -e "$item" ]] || continue
+    base="${item##*/}"
+    [[ "$base" == "." || "$base" == ".." || "$base" == "$sif_name" ]] && continue
+    if [[ ! -e "$target_home/$base" ]]; then
+      if ! cp -a "$item" "$target_home/" 2>/dev/null; then
+        echo "ERROR: failed to migrate legacy state item ${item} to ${target_home}; check permissions and available space." >&2
+        return 1
+      fi
+      migrated=1
+    fi
+  done
+  if [[ "$migrated" -eq 1 ]]; then
+    echo "✓ migrated user configuration from ${legacy_dir} to ${target_home}" >&2
+  fi
 }
 
 report_podman_image_identity() {
@@ -316,24 +341,6 @@ report_apptainer_image_identity() {
   check_image_compatibility "$ref" "$product" "$version" "$min_version" "$is_override"
 }
 
-migrate_legacy_state() {
-  local legacy_dir="$1" target_home="$2" sif_name="$3"
-  [[ -d "$legacy_dir" ]] || return 0
-  [[ -d "$target_home" ]] || return 0
-  local item base migrated=0
-  for item in "$legacy_dir"/* "$legacy_dir"/.*; do
-    [[ -e "$item" ]] || continue
-    base="${item##*/}"
-    [[ "$base" == "." || "$base" == ".." || "$base" == "$sif_name" ]] && continue
-    if [[ ! -e "$target_home/$base" ]]; then
-      cp -a "$item" "$target_home/" 2>/dev/null || true
-      migrated=1
-    fi
-  done
-  if [[ "$migrated" -eq 1 ]]; then
-    echo "✓ migrated user configuration from ${legacy_dir} to ${target_home}" >&2
-  fi
-}
 
 
 resolve_gh_token() {

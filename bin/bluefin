@@ -140,6 +140,10 @@ check_image_compatibility() {
     fi
     return 0
   }
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: ${product} image ${ref} has malformed version label '${version}'; expected numeric MAJOR.MINOR.PATCH." >&2
+    return 1
+  fi
   local ver_series="${version%.*}"
   if [[ "$ver_series" != "$EXPECTED_IMAGE_SERIES" ]]; then
     if [[ "$is_override" -eq 1 ]]; then
@@ -235,7 +239,10 @@ migrate_legacy_state() {
     base="${item##*/}"
     [[ "$base" == "." || "$base" == ".." || "$base" == "$sif_name" ]] && continue
     if [[ ! -e "$target_home/$base" ]]; then
-      cp -a "$item" "$target_home/" 2>/dev/null || true
+      if ! cp -a "$item" "$target_home/" 2>/dev/null; then
+        echo "ERROR: failed to migrate legacy state item ${item} to ${target_home}; check permissions and available space." >&2
+        return 1
+      fi
       migrated=1
     fi
   done
@@ -348,7 +355,10 @@ run_review() {
   workspace="${root}/workspace"
   scratch="${root}/tmp"
   name="bluefin-review-${key}-$(date +%s)-$$"
-  if [[ -n "${BLUEFIN_REVIEW_IMAGE:-}" ]]; then
+  if [[ -n "${REVIEW_APPLIANCE_IMAGE:-}" ]]; then
+    image="$REVIEW_APPLIANCE_IMAGE"
+    is_override=1
+  elif [[ -n "${BLUEFIN_REVIEW_IMAGE:-}" ]]; then
     image="$BLUEFIN_REVIEW_IMAGE"
     is_override=1
   elif [[ -n "${BLUEFIN_REVIEW_SIF:-}" ]]; then
@@ -414,7 +424,10 @@ run_contribute() {
   root="${XDG_STATE_HOME:-${HOME}/.local/state}/bluefin/instances/${key}"
   home="${root}/home"
   name="bluefin-contribute-${key}-$(date +%s)-$$"
-  if [[ -n "${BLUEFIN_CONTRIBUTE_IMAGE:-}" ]]; then
+  if [[ -n "${CONTRIBUTE_IMAGE:-}" ]]; then
+    image="$CONTRIBUTE_IMAGE"
+    is_override=1
+  elif [[ -n "${BLUEFIN_CONTRIBUTE_IMAGE:-}" ]]; then
     image="$BLUEFIN_CONTRIBUTE_IMAGE"
     is_override=1
   elif [[ -n "${BLUEFIN_CONTRIBUTE_SIF:-}" ]]; then

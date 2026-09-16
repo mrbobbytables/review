@@ -292,7 +292,25 @@ set -e
 [[ "$incompat_output" == *"is incompatible with this launcher (requires >= 26.08.06)"* ]] ||
   fail "incompatible image diagnostic was not actionable: $incompat_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after image compatibility check failed"
+# Documented review alias selects the same packaged launcher override path.
+: >"$mock_podman_log"
+REVIEW_APPLIANCE_IMAGE="custom/review:alias" FAKE_INSPECT_VERSION="26.08.07" "${repo_root}/bin/bluefin" review owner/repo >/dev/null 2>&1 ||
+  fail "REVIEW_APPLIANCE_IMAGE alias failed to start"
+grep -qFx "pull custom/review:alias" "$mock_podman_log" || fail "review alias was not refreshed"
+grep -q '^run .* custom/review:alias ' "$mock_podman_log" || fail "review alias was not passed to the container"
 
+# Non-unknown malformed OCI version labels must fail before execution.
+for malformed_version in 26.08.foo 26.08.06-rc; do
+  : >"$mock_podman_log"
+  set +e
+  malformed_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+  malformed_status=$?
+  set -e
+  [[ "$malformed_status" -ne 0 ]] || fail "packaged review accepted malformed image version $malformed_version"
+  [[ "$malformed_output" == *"malformed version label '$malformed_version'"* ]] ||
+    fail "malformed review version diagnostic was not actionable: $malformed_output"
+  ! grep -q '^run ' "$mock_podman_log" || fail "packaged review ran after malformed version check failed"
+done
 # Explicit image override warning
 : >"$mock_podman_log"
 override_output="$(BLUEFIN_REVIEW_IMAGE="custom/review:old" FAKE_INSPECT_VERSION="26.08.05" "${repo_root}/bin/bluefin" review owner/repo 2>&1)" ||
@@ -317,7 +335,27 @@ review_instance_home="$(find "$scratch/home/.local/state/bluefin/instances" -typ
 [[ -d "$legacy_review_dir" ]] || fail "legacy review state directory was broadly deleted"
 [[ -f "$legacy_review_dir/bluefin-review.sif" ]] || fail "legacy SIF was deleted from legacy directory"
 [[ -f "$legacy_review_dir/user_session.json" ]] || fail "original session was deleted from legacy directory"
-
+# A failed copy must abort migration and must not report success.
+legacy_failure_item="$legacy_review_dir/migration-failure.json"
+touch "$legacy_failure_item"
+cat >"$scratch/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -a ]]; then
+  exit 1
+fi
+exec /bin/cp "$@"
+EOF
+chmod +x "$scratch/bin/cp"
+set +e
+migration_failure_output="$(PATH="$scratch/bin:$PATH" BLUEFIN_INSTANCE=migration-failure "${repo_root}/bin/bluefin" review owner/repo 2>&1)"
+migration_failure_status=$?
+set -e
+[[ "$migration_failure_status" -ne 0 ]] || fail "legacy migration continued after cp failure"
+[[ "$migration_failure_output" == *"failed to migrate legacy state item"* ]] ||
+  fail "legacy migration failure was not actionable: $migration_failure_output"
+[[ "$migration_failure_output" != *"migrated user configuration from"* ]] ||
+  fail "legacy migration claimed success after cp failure: $migration_failure_output"
+rm -f "$scratch/bin/cp"
 mv "$scratch/bin/krun" "$scratch/krun"
 : >"$mock_apptainer_log"
 fallback_output="$(EXPECT_APPTAINER_CREDENTIALS=1 EXPECT_APPTAINER_HIVE=1 OPENAI_API_KEY=test-provider-token REVIEW_TEST_KVM_DEVICE="$scratch/missing-kvm" "${repo_root}/bin/bluefin" review projectbluefin/review 2>&1)" || fail "review Apptainer fallback lost credentials"
@@ -440,7 +478,25 @@ set -e
 [[ "$incompat_contribute_output" == *"is incompatible with this launcher (requires >= 26.08.02)"* ]] ||
   fail "incompatible contributor image diagnostic was not actionable: $incompat_contribute_output"
 ! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after image compatibility check failed"
+# Documented contributor alias selects the same packaged launcher override path.
+: >"$mock_podman_log"
+CONTRIBUTE_IMAGE="custom/contribute:alias" FAKE_INSPECT_VERSION="26.08.07" "${repo_root}/bin/bluefin" contribute owner/repo >/dev/null 2>&1 ||
+  fail "CONTRIBUTE_IMAGE alias failed to start"
+grep -qFx "pull custom/contribute:alias" "$mock_podman_log" || fail "contributor alias was not refreshed"
+grep -q '^run .* custom/contribute:alias$' "$mock_podman_log" || fail "contributor alias was not passed to the container"
 
+# Malformed contributor labels must fail before execution as well.
+for malformed_version in 26.08.foo 26.08.06-rc; do
+  : >"$mock_podman_log"
+  set +e
+  malformed_contribute_output="$(FAKE_INSPECT_VERSION="$malformed_version" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)"
+  malformed_contribute_status=$?
+  set -e
+  [[ "$malformed_contribute_status" -ne 0 ]] || fail "packaged contribute accepted malformed image version $malformed_version"
+  [[ "$malformed_contribute_output" == *"malformed version label '$malformed_version'"* ]] ||
+    fail "malformed contributor version diagnostic was not actionable: $malformed_contribute_output"
+  ! grep -q '^run ' "$mock_podman_log" || fail "packaged contribute ran after malformed version check failed"
+done
 # Explicit contributor image override warning
 : >"$mock_podman_log"
 override_contribute_output="$(BLUEFIN_CONTRIBUTE_IMAGE="custom/contribute:old" FAKE_INSPECT_VERSION="26.08.01" "${repo_root}/bin/bluefin" contribute owner/repo 2>&1)" ||
