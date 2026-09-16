@@ -210,6 +210,12 @@ EOF
 chmod +x "$scratch/bin/squashfuse_ll"
 export REVIEW_TEST_FUSE_DEVICE=/dev/null
 chmod +x "$scratch/bin/apptainer"
+# Keep fallback identity checks hermetic even when the host provides skopeo.
+cat >"$scratch/bin/skopeo" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+chmod +x "$scratch/bin/skopeo"
 chmod +x "$scratch/bin/krun"
 
 cat >"$scratch/bin/gh" <<'EOF'
@@ -224,6 +230,7 @@ chmod +x "$scratch/bin/gh"
 
 export PATH="$scratch/bin:$PATH"
 export HOME="$scratch/home"
+export XDG_STATE_HOME="$scratch/home/.local/state"
 export REVIEW_TEST_KVM_DEVICE="$kvm"
 export GH_TOKEN=mock-token GITHUB_TOKEN=mock-token
 unset HIVE_HUB
