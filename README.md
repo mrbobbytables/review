@@ -156,7 +156,9 @@ slash commands.
 | `g` / `G` | Jump to the first / last row |
 | `h` / `l` | Collapse / expand the focused trace span |
 | `c` | Comment on the captured target after live revalidation |
-| `enter` | Cite the focused item in the prompt |
+| `enter` | Open the reader for the focused pull request |
+| `v` | Open the focused issue or pull request in a browser |
+| `i` | Cite the focused item in the prompt |
 | `?` | Show the in-app key guide |
 | `q` / `Esc` | Close the workbench |
 
