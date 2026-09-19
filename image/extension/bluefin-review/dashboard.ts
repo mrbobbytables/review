@@ -839,13 +839,13 @@ export class ReviewDashboard {
 				return;
 			case "return":
 			case "enter":
-				if (item.type !== "pr") return;
+				if (activeItem.type !== "pr") return;
 				this.showReader = true;
 				this.readerScroll = 0;
 				this.loadSelectedReaderDetail();
 				return;
 			case "v":
-				this.emitAction({ kind: "open_browser", item });
+				this.emitAction({ kind: "open_browser", item: activeItem });
 				return;
 			case "i":
 				this.emitAction({ kind: "reference", item, items });

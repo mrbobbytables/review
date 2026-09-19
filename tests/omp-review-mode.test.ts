@@ -1307,6 +1307,50 @@ test("dashboard navigates, folds, filters, and returns actions", (t) => {
 	assert.ok(frame().some((row) => row.includes("comment")), "help lists supported actions");
 	assert.ok(frame().some((row) => row.includes("slay")), "help exposes mass autoreview");
 });
+test("Enter and v inspect the focused item even when a selection is active", (t) => {
+	const mode = new ReviewMode({ org: "projectbluefin" });
+	mode.items = [
+		queueItem({ id: 1, type: "issue", repo: "projectbluefin/review", title: "triage: rail is silent" }),
+		queueItem({ id: 2, type: "pr", repo: "projectbluefin/review", title: "fix(rail): speak up", ciStatus: "success" }),
+	];
+
+	let action;
+	const dashboard = new ReviewDashboard(
+		{ requestRender() {} },
+		PLAIN_PAINTER,
+		mode,
+		(result) => {
+			action = result;
+		},
+		() => {},
+		20,
+	);
+	t.after(() => dashboard.dispose());
+
+	assert.equal(mode.selected().id, 1, "focus starts on the issue");
+	dashboard.handleInput(" ");
+	dashboard.handleInput("j");
+	assert.equal(mode.selected().id, 2, "focus moves to the PR");
+	assert.equal(mode.chosenItems()[0].id, 1, "the issue stays selected");
+
+	dashboard.handleInput("v");
+	assert.equal(action.kind, "open_browser");
+	assert.equal(action.item.id, 2, "v opens the focused item, not the first selected one");
+
+	dashboard.handleInput("\r");
+	assert.equal(dashboard.isReaderActive, true, "Enter opens the reader for the focused PR");
+	dashboard.handleInput("q");
+	assert.equal(dashboard.isReaderActive, false);
+
+	// Mirror case: a PR selected while focus sits on an issue must not open the reader.
+	dashboard.handleInput("x");
+	dashboard.handleInput(" ");
+	dashboard.handleInput("k");
+	assert.equal(mode.selected().id, 1, "focus back on the issue");
+	assert.equal(mode.chosenItems()[0].id, 2, "the PR stays selected");
+	dashboard.handleInput("\r");
+	assert.equal(dashboard.isReaderActive, false, "Enter on a focused issue keeps the reader closed");
+});
 test("dashboard interactive search live-filters and selects items by title", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "workbench-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
