@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "5.5"
-last_updated: "2026-09-19"
+version: "5.6"
+last_updated: "2026-09-20"
 id: launcher
 one_line_purpose: Change the hive-contribute launcher without breaking its runtime contracts.
 entry_point: docs/skills/launcher.md
@@ -65,7 +65,8 @@ Persistent OMP homes are target-specific based on the hub hash.
 Every interactive microVM stays attached to its launching terminal in the foreground.
 Detached containers are not supported. Ctrl-C stops only that invocation.
 
-Fallback to Apptainer requires `squashfuse_ll` or `squashfuse` and a readable,
+Fallback to Apptainer requires `squashfuse_ll` or `squashfuse` (bundled by Apptainer
+at `<prefix>/libexec/apptainer/bin` or on `$PATH`) and a readable,
 writable character device at `/dev/fuse`; `hive-contribute doctor` reports each missing
 prerequisite separately before launch.
 

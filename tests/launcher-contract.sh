@@ -57,11 +57,12 @@ exit 0
 EOF
 chmod +x "$fake_bin/krun"
 
-cat >"$fake_bin/squashfuse_ll" <<'EOF'
+mkdir -p "$scratch/libexec/apptainer/bin"
+cat >"$scratch/libexec/apptainer/bin/squashfuse_ll" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$fake_bin/squashfuse_ll"
+chmod +x "$scratch/libexec/apptainer/bin/squashfuse_ll"
 
 cat >"$fake_bin/podman" <<EOF
 #!/usr/bin/env bash
@@ -659,15 +660,10 @@ EOF
 # -----------------------------------------------------------------------------
 # Scenario 6b: a degraded fallback must name its own cause (#567). Without krun
 #              the Apptainer path is all that is left, and its failure modes
-#              need different fixes: grant the host a device, or fix that
-#              device's permissions. A single generic "Apptainer unavailable"
-#              sends the operator down the wrong one.
-#
-#              The squashfuse-userland branch is deliberately not covered: the
-#              probe is `command -v`, so hiding it means controlling the whole
-#              PATH the launcher inherits. Any host with squashfuse installed
-#              would silently pass a test that pretended to remove it, which is
-#              worse than an honest gap.
+#              need different fixes: grant the host a device, fix that device's
+#              permissions, or install the squashfuse userland. A single
+#              generic "Apptainer unavailable" sends the operator down the wrong
+#              one. Apptainer >= 1.3 bundles squashfuse_ll in libexec (#645).
 # -----------------------------------------------------------------------------
 test_doctor_distinguishes_fallback_failures() {
   local output
@@ -687,12 +683,42 @@ EOF
     export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
   }
 
+  # Bundled helper in libexec (absent from PATH): the standard layout on Fedora,
+  # EPEL, Ubuntu PPA, and upstream packages passes without needing squashfuse on PATH (#645).
+  _degraded_doctor
+  local status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  assert_eq "$status" "0" "doctor should pass when squashfuse is bundled in libexec"
+  assert_contains "$output" "isolated Apptainer fallback ready" "reports fallback ready with libexec helper"
+  assert_not_contains "$output" "squashfuse userland is unavailable" "must not report userland unavailable"
+
+  # Helper on PATH (absent from libexec): unbundled packaging (e.g. Debian sid,
+  # Homebrew) passes when squashfuse is found on PATH (#645).
+  _degraded_doctor
+  mv "$scratch/libexec/apptainer/bin/squashfuse_ll" "$fake_bin/squashfuse_ll"
+  status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  mv "$fake_bin/squashfuse_ll" "$scratch/libexec/apptainer/bin/squashfuse_ll"
+  assert_eq "$status" "0" "doctor should pass when squashfuse is on PATH"
+  assert_contains "$output" "isolated Apptainer fallback ready" "reports fallback ready with PATH helper"
+  assert_not_contains "$output" "squashfuse userland is unavailable" "must not report userland unavailable"
+
+  # Genuinely absent userland: neither libexec nor PATH provides squashfuse.
+  _degraded_doctor
+  mv "$scratch/libexec/apptainer/bin/squashfuse_ll" "$scratch/libexec/apptainer/bin/squashfuse_ll.bak"
+  status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  mv "$scratch/libexec/apptainer/bin/squashfuse_ll.bak" "$scratch/libexec/apptainer/bin/squashfuse_ll"
+  [[ "$status" -ne 0 ]] || fail "doctor must fail when squashfuse userland is absent"
+  assert_contains "$output" "squashfuse userland is unavailable; install squashfuse" "reports userland unavailable"
+  assert_not_contains "$output" "FUSE device" "userland failure must not blame the device"
+
   # Missing device: a host capability, not a package. A degraded fallback with
   # no KVM path left is a failed preflight, so the status must say so too --
   # an operator scripting `hive-contribute doctor` sees the exit code first.
   _degraded_doctor
   export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$scratch/absent-fuse"
-  local status=0
+  status=0
   output="$("$launcher" doctor 2>&1)" || status=$?
   [[ "$status" -ne 0 ]] || fail "doctor must fail when neither krun nor the Apptainer fallback is usable"
   assert_contains "$output" "FUSE device $scratch/absent-fuse is missing" "absent FUSE names the device"

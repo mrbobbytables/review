@@ -173,8 +173,25 @@ kvm_runtime_ready() {
 fallback_ready() {
   local fuse="${HIVE_CONTRIBUTE_TEST_FUSE_DEVICE:-/dev/fuse}"
   command -v apptainer &>/dev/null || { FALLBACK_FAILURE="Apptainer is unavailable; install Apptainer"; return 1; }
-  { command -v squashfuse_ll &>/dev/null || command -v squashfuse &>/dev/null; } ||
-    { FALLBACK_FAILURE="squashfuse userland is unavailable; install squashfuse"; return 1; }
+
+  # Apptainer >= 1.3 bundles squashfuse_ll at <prefix>/libexec/apptainer/bin,
+  # which is not on login $PATH (Fedora, EPEL, Ubuntu PPA, upstream packages).
+  # Apptainer searches that libexec directory first, then user $PATH (#645).
+  # Distribution packages without bundled helpers (e.g. Debian sid) place
+  # squashfuse on $PATH instead.
+  local apptainer_bin apptainer_real libexec_real libexec_bin
+  apptainer_bin="$(command -v apptainer)"
+  apptainer_real="$(readlink -f "$apptainer_bin" 2>/dev/null || echo "$apptainer_bin")"
+  libexec_real="$(dirname "$apptainer_real")/../libexec/apptainer/bin"
+  libexec_bin="$(dirname "$apptainer_bin")/../libexec/apptainer/bin"
+  {
+    [[ -x "$libexec_real/squashfuse_ll" ]] ||
+    [[ -x "$libexec_real/squashfuse" ]] ||
+    [[ -x "$libexec_bin/squashfuse_ll" ]] ||
+    [[ -x "$libexec_bin/squashfuse" ]] ||
+    command -v squashfuse_ll &>/dev/null ||
+    command -v squashfuse &>/dev/null;
+  } || { FALLBACK_FAILURE="squashfuse userland is unavailable; install squashfuse"; return 1; }
   [[ -e "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is missing"; return 1; }
   [[ -r "$fuse" && -w "$fuse" ]] || { FALLBACK_FAILURE="FUSE device ${fuse} is not readable and writable"; return 1; }
   return 0
