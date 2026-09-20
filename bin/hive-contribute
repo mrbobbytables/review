@@ -171,6 +171,11 @@ kvm_runtime_ready() {
 }
 
 fallback_ready() {
+  local os="${HIVE_CONTRIBUTE_TEST_OS:-$(uname -s)}"
+  if [[ "$os" != Linux ]]; then
+    FALLBACK_FAILURE="this appliance requires a Linux host; on macOS use Lima, on Windows use WSL2"
+    return 1
+  fi
   local fuse="${HIVE_CONTRIBUTE_TEST_FUSE_DEVICE:-/dev/fuse}"
   command -v apptainer &>/dev/null || { FALLBACK_FAILURE="Apptainer is unavailable; install Apptainer"; return 1; }
   { command -v squashfuse_ll &>/dev/null || command -v squashfuse &>/dev/null; } ||

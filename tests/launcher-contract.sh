@@ -74,7 +74,13 @@ if [[ "\${1:-}" == "--runtime=krun" ]]; then
 fi
 [[ "\${1:-}" == info ]] && { [[ "\${FAKE_PODMAN_INFO_FAIL:-0}" == 1 ]] && exit 1 || exit 0; }
 if [[ "\${1:-} \${2:-} \${3:-}" == "system connection list" ]]; then
-  [[ "\${FAKE_PODMAN_REMOTE:-0}" != 1 ]] || printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
+  if [[ "\${FAKE_PODMAN_REMOTE:-0}" == 1 ]]; then
+    if [[ "\${*:-}" == *"--format"* ]]; then
+      printf 'ssh://engine.example.test/run/podman.sock\ttrue\n'
+    else
+      printf 'remote\tssh://engine.example.test/run/podman.sock\tidentity\ttrue\n'
+    fi
+  fi
   exit 0
 fi
 case "\${1:-} \${2:-}" in
@@ -169,6 +175,7 @@ clean_env() {
   export HIVE_CONTRIBUTE_TEST_FUSE_DEVICE="$fake_fuse"
   unset HIVE_CONTRIBUTE_CONFIG
   unset HIVE_CONTRIBUTE_TEST_HOST_ROOT
+  unset HIVE_CONTRIBUTE_TEST_OS
   unset HUB REGISTRATION IMAGE BACKEND
   unset GH_TOKEN GITHUB_TOKEN
   unset FAKE_PODMAN_INFO_FAIL FAKE_PODMAN_REMOTE FAKE_PODMAN_PULL_FAIL FAKE_PODMAN_IMAGE_EXISTS FAKE_PODMAN_NO_KRUN
@@ -722,6 +729,66 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# Scenario 6c: macOS and Windows hosts must be told that a Linux environment is
+#              required rather than told to install an Apptainer package that does
+#              not exist (#646).
+# -----------------------------------------------------------------------------
+test_non_linux_host_diagnostic() {
+  local output status
+
+  _non_linux_setup() {
+    local os="$1"
+    clean_env
+    export HIVE_CONTRIBUTE_TEST_OS="$os"
+    export FAKE_PODMAN_REMOTE=1
+    mkdir -p "$fake_home/.config/hive"
+    cat >"$fake_home/.config/hive-contribute.yml" <<EOF
+hub: wss://hub.example.com/contribute
+registration: $fake_home/.config/hive/contributor.env
+image: ghcr.io/projectbluefin/contribute:stable
+backend: omp
+EOF
+    chmod 600 "$fake_home/.config/hive-contribute.yml"
+    touch "$fake_home/.config/hive/contributor.env"
+    export FAKE_GH_TOKEN_VALUE="fake-doctor-gh-token"
+  }
+
+  # Darwin (macOS) host with remote podman engine (e.g. Podman Machine)
+  _non_linux_setup "Darwin"
+  status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  [[ "$status" -ne 0 ]] || fail "doctor must fail on non-Linux host"
+  assert_contains "$output" "Podman targets a remote engine; this appliance requires a Linux host; on macOS use Lima, on Windows use WSL2" \
+    "doctor on macOS names platform requirement"
+  assert_not_contains "$output" "install Apptainer" "doctor on macOS must not advise installing Apptainer"
+
+  status=0
+  output="$("$launcher" run 2>&1)" || status=$?
+  [[ "$status" -ne 0 ]] || fail "run must fail on non-Linux host"
+  assert_contains "$output" "Podman targets a remote engine; this appliance requires a Linux host; on macOS use Lima, on Windows use WSL2" \
+    "run on macOS names platform requirement"
+  assert_not_contains "$output" "install Apptainer" "run on macOS must not advise installing Apptainer"
+
+  # Windows host (e.g. MINGW/MSYS/Cygwin)
+  _non_linux_setup "MINGW64_NT-10.0"
+  status=0
+  output="$("$launcher" doctor 2>&1)" || status=$?
+  [[ "$status" -ne 0 ]] || fail "doctor must fail on Windows host"
+  assert_contains "$output" "this appliance requires a Linux host; on macOS use Lima, on Windows use WSL2" \
+    "doctor on Windows names platform requirement"
+  assert_not_contains "$output" "install Apptainer" "doctor on Windows must not advise installing Apptainer"
+
+  status=0
+  output="$("$launcher" run 2>&1)" || status=$?
+  [[ "$status" -ne 0 ]] || fail "run must fail on Windows host"
+  assert_contains "$output" "this appliance requires a Linux host; on macOS use Lima, on Windows use WSL2" \
+    "run on Windows names platform requirement"
+  assert_not_contains "$output" "install Apptainer" "run on Windows must not advise installing Apptainer"
+
+  unset -f _non_linux_setup
+}
+
+# -----------------------------------------------------------------------------
 # Scenario 7: `setup` survives upstream's HOST-CLI preflight.
 #
 # Hive's contribute-setup depends on contribute-check-backend, which probes the
@@ -854,6 +921,9 @@ test_doctor_failures_and_success
 
 echo "6b. Testing that a degraded Apptainer fallback names its cause..."
 test_doctor_distinguishes_fallback_failures
+
+echo "6c. Testing non-Linux host diagnostic on doctor and run..."
+test_non_linux_host_diagnostic
 
 echo "7. Testing setup against upstream's host-CLI preflight..."
 test_setup_satisfies_host_cli_probe

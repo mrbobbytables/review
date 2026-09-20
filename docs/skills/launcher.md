@@ -1,7 +1,7 @@
 ---
 name: launcher
-version: "5.5"
-last_updated: "2026-09-19"
+version: "5.6"
+last_updated: "2026-09-20"
 id: launcher
 one_line_purpose: Change the hive-contribute launcher without breaking its runtime contracts.
 entry_point: docs/skills/launcher.md
@@ -33,6 +33,23 @@ The primary launcher executable is `bin/hive-contribute`:
 The `just contribute`, `just doctor`, `just setup`, `just config`, and `just contribute-build`
 recipes are thin wrappers around `bin/hive-contribute`.
 
+## Supported platforms
+
+The appliance runs only in a Linux environment. Both isolation tiers depend directly on Linux kernel facilities: `/dev/kvm` for the libkrun microVM tier, and `/dev/fuse` plus unprivileged user namespaces for the Apptainer fallback. Neither facility exists natively on macOS or Windows.
+
+- **Linux**: Supported natively. Prefers Podman with `krun` when `/dev/kvm` is available; falls back to Apptainer.
+- **macOS**: Requires a Linux VM. Apptainer has no native macOS build, and Podman Machine targets a remote engine (`ssh://`) without nested KVM or `krun`. Provision a Linux VM with [Lima](https://github.com/lima-vm/lima):
+  ```bash
+  limactl start template://apptainer
+  limactl shell apptainer
+  ```
+  (macOS 26+ on Apple Silicon also supports Apple's `container` path.) Reaches the Apptainer tier.
+- **Windows**: Requires a Linux VM via WSL2:
+  ```powershell
+  wsl --install
+  ```
+  Install Podman or Apptainer inside the WSL2 distro. Windows 11 enables nested virtualization by default, making `/dev/kvm` available for either tier. Windows 10 lacks nested virtualization in WSL2 and reaches the Apptainer tier.
+
 ## Configuration: One File
 
 All configuration lives in `${XDG_CONFIG_HOME:-~/.config}/hive-contribute.yml`.
@@ -41,6 +58,9 @@ The file has six flat keys: `hub`, `registration`, `image`, `backend`, `memory`,
 swap pinned to the memory ceiling; `none` or `0` removes a ceiling. They apply on the
 Podman path, where they also size the microVM — the Apptainer fallback stays unbounded
 because it can only apply a ceiling through cgroups delegation a fallback host often lacks.
+When running in WSL2, `registration:` must stay on the native Linux filesystem; pointing
+it under `/mnt/c` loses `0600` permissions because DrvFs metadata is off by default, silently
+leaving the credential world-readable.
 The launcher creates the file on first run, seeding `hub` from an existing
 `~/.config/hive/contributor.env` if present. Setting `HIVE_CONTRIBUTE_CONFIG` points to an
 alternate configuration file.
@@ -93,7 +113,8 @@ if registry connectivity fails.
   an explicit empty value is the relay's documented opt-out of session labeling,
   while leaving it unset lets the relay default the label to the backend name.
 - The contributor worker receives exactly one selected Hive registration mounted read-only
-  at `/home/hive/.config/hive/contributor.env:ro`.
+  at `/home/hive/.config/hive/contributor.env:ro`. On WSL2, this file must reside on the Linux
+  filesystem rather than a Windows drive mount (`/mnt/c`) to preserve `0600` permissions.
 - A registration token is rotated by the hub, and only the hub can say whether a
   stored one is still accepted. This launcher does not ask: it mounts the
   credential and lets Hive's relay authenticate. A rejected token surfaces as

@@ -16,6 +16,38 @@ hive-contribute
 just contribute
 ```
 
+## Supported Platforms
+
+The appliance requires a Linux environment. Both isolation tiers depend directly on Linux kernel facilities: `/dev/kvm` for the microVM tier, and `/dev/fuse` plus unprivileged user namespaces for the Apptainer tier. On macOS and Windows, a Linux virtual machine must be provisioned.
+
+| Host | Working shape | Isolation tier |
+|---|---|---|
+| **Linux** | Native | `krun` when `/dev/kvm` and registered `krun` are present; otherwise Apptainer |
+| **macOS** | Linux VM via Lima or Apple `container` | Apptainer tier |
+| **Windows 11** | WSL2 Linux distribution | Either tier (nested `/dev/kvm` enabled by default) |
+| **Windows 10** | WSL2 Linux distribution | Apptainer tier (no nested `/dev/kvm`) |
+
+### Provisioning on macOS
+
+Apptainer does not run natively on macOS, and Podman Machine targets a remote engine (`ssh://`) without nested KVM or `krun`. Run the appliance inside a [Lima](https://github.com/lima-vm/lima) VM using the official Apptainer template:
+
+```bash
+limactl start template://apptainer
+limactl shell apptainer
+```
+
+(macOS 26+ on Apple Silicon also supports Apple's `container` path.)
+
+### Provisioning on Windows
+
+Run the appliance inside a Windows Subsystem for Linux (WSL2) distribution:
+
+```powershell
+wsl --install
+```
+
+Install Podman or Apptainer inside the WSL2 Linux environment (e.g., Ubuntu).
+
 ## Installation
 
 Install `hive-contribute` onto your `PATH` or run directly from a checkout.
@@ -70,13 +102,15 @@ cpus: 2
 | Key | Meaning | Default |
 |---|---|---|
 | `hub` | The hive WebSocket endpoint to join (`wss://<host>/contribute`) | Seeded from registration or set via `setup` |
-| `registration` | Path to Hive's credential file | `~/.config/hive/contributor.env` |
+| `registration` | Path to Hive's credential file (must reside on a Linux filesystem; see WSL2 hazard below) | `~/.config/hive/contributor.env` |
 | `image` | Contributor runtime image reference (registry location) | `ghcr.io/projectbluefin/contribute:stable` |
 | `backend` | Agent CLI Hive drives inside the container | `omp` |
 | `memory` | RAM ceiling, swap pinned to it; `none` removes it | `4g` (upstream's contributor envelope) |
 | `cpus` | CPU ceiling; `none` removes it | `2` (upstream's contributor envelope) |
 
 `memory` and `cpus` are enforced on the Podman path, where they also size the microVM. The Apptainer fallback runs unbounded: it can only apply a ceiling through cgroups delegation that a fallback host frequently does not have.
+
+> **WSL2 credential permission hazard:** When running inside WSL2, `registration:` must point to a path on the WSL2 Linux filesystem (such as `~/.config/hive/contributor.env`), never under a Windows drive mount like `/mnt/c/`. DrvFs mounts for Windows drives disable Linux file permission metadata by default. Pointing `registration:` under `/mnt/c` loses the `0600` permissions written during setup, silently leaving the Hive credential world-readable.
 
 ## Isolation Model
 

@@ -6,8 +6,9 @@ The repository ships one OMP-owned image:
   `image/contribute/Containerfile`, carries Hive's contributor runtime and OMP.
 
 The image does not select a provider, model, or thinking effort. OMP resolves those
-inside the appliance. Local launchers prefer Podman's `krun` runtime and KVM,
-then fall back explicitly to isolated Apptainer execution.
+inside the appliance. The appliance requires a Linux environment (native Linux host,
+or a Linux VM via Lima on macOS or WSL2 on Windows). Local launchers prefer Podman's
+`krun` runtime and KVM, then fall back explicitly to isolated Apptainer execution.
 
 The image uses FSDK base images (`ghcr.io/projectbluefin/base:26.08`, used as a build input location)
 pinned by tag and digest, and pins fetched binary release assets by
