@@ -704,10 +704,19 @@ EOF
   assert_not_contains "$output" "squashfuse userland is unavailable" "must not report userland unavailable"
 
   # Genuinely absent userland: neither libexec nor PATH provides squashfuse.
+  # Run with a controlled PATH containing only the fake harness and essential
+  # coreutils so any host-installed squashfuse cannot falsely satisfy the probe (#645).
   _degraded_doctor
+  local stub_coreutils="$scratch/coreutils"
+  mkdir -p "$stub_coreutils"
+  for cmd in bash dirname readlink sed head; do
+    local cmd_path
+    cmd_path="$(command -v "$cmd" 2>/dev/null || true)"
+    [[ -n "$cmd_path" ]] && ln -sf "$cmd_path" "$stub_coreutils/$cmd"
+  done
   mv "$scratch/libexec/apptainer/bin/squashfuse_ll" "$scratch/libexec/apptainer/bin/squashfuse_ll.bak"
   status=0
-  output="$("$launcher" doctor 2>&1)" || status=$?
+  output="$(PATH="$fake_bin:$stub_coreutils" "$launcher" doctor 2>&1)" || status=$?
   mv "$scratch/libexec/apptainer/bin/squashfuse_ll.bak" "$scratch/libexec/apptainer/bin/squashfuse_ll"
   [[ "$status" -ne 0 ]] || fail "doctor must fail when squashfuse userland is absent"
   assert_contains "$output" "squashfuse userland is unavailable; install squashfuse" "reports userland unavailable"
