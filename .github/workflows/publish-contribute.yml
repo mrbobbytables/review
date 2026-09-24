@@ -1,6 +1,10 @@
 name: publish contribute image
 
 on:
+  # Daily rebuild picks up upstream Hive's tracking branch (v4) automatically
+  # so the unpinned contributor image does not go stale.
+  schedule:
+    - cron: '40 3 * * *'
   push:
     branches:
       - main
@@ -75,11 +79,10 @@ jobs:
           set -euo pipefail
           just --justfile justfile --list
 
-      - name: Guided onboarding behavior
+      - name: Launcher contracts
         run: |
           set -euo pipefail
-          bash tests/just-onboarding.sh
-
+          bash tests/launcher-contract.sh
       - name: Recipe bodies are valid bash
         run: |
           set -euo pipefail
@@ -91,23 +94,18 @@ jobs:
           bash -n recipe_bodies.sh
           rm -f recipe_bodies.sh
 
-      - name: Review mode and contribute contracts
+      - name: Contributor contracts
         run: |
           set -euo pipefail
           node --test tests/update-omp-pins.test.mjs
           node --test tests/update-derived-pins.test.mjs
-          bash tests/omp-review-mode.sh
+          node --test tests/renovate-tracking.test.mjs
           bash tests/contribute-contract.sh
-
 
       - name: Interactive launcher docs and shell stay aligned
         run: |
           set -euo pipefail
           bash tests/readme-quickstart.sh
-          grep -Fq 'review-container' justfile
-          grep -Fq 'review-queue' justfile
-          grep -Fq 'ghcr.io/projectbluefin/review:stable' README.md
-
   # One source of truth for every OCI value in this run: the per-arch builds
   # stamp these as config labels and the index carries the identical set as
   # annotations, so `created` is decided once, before either.
@@ -119,8 +117,10 @@ jobs:
       version: ${{ steps.metadata.outputs.version }}
       base_name: ${{ steps.metadata.outputs.base_name }}
       base_digest: ${{ steps.metadata.outputs.base_digest }}
+      hive_commit: ${{ steps.metadata.outputs.hive_commit }}
       stable: ${{ steps.metadata.outputs.stable }}
       tags: ${{ steps.metadata.outputs.tags }}
+      sha_tag: ${{ steps.metadata.outputs.sha_tag }}
       release: ${{ steps.metadata.outputs.release }}
     steps:
       - name: Checkout
@@ -139,17 +139,35 @@ jobs:
           [[ "$base_digest" =~ ^sha256:[0-9a-f]{64}$ ]] ||
             { echo "contribute base must be digest-pinned, got: ${base_image}" >&2; exit 1; }
 
+          # Hive's runtime is tracked, not pinned, so it is resolved per run —
+          # but ONCE per run, here. Each architecture builds on its own runner
+          # minutes apart, and upstream moves several times a day: resolving in
+          # the build legs would publish an index whose amd64 and arm64 images
+          # carry different Hive commits, with SBOMs and attestations that
+          # disagree about a tag claiming to be one artifact.
+          hive_commit="$(git ls-remote https://github.com/hivecommons/hive refs/heads/v4 | cut -f1)"
+          [[ "$hive_commit" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "could not resolve hivecommons/hive v4" >&2; exit 1; }
+
           release=false
-          sha_tag="sha-${GITHUB_SHA}"
-          tags="${sha_tag}"
+          # The repo SHA alone does NOT identify this image. A scheduled
+          # rebuild runs at the same GITHUB_SHA and resolves whatever Hive's
+          # tracking branch points at that morning, so `sha-<repo sha>` would
+          # be overwritten with different contents while claiming to be
+          # immutable — and an SBOM or attestation pinned to it would describe
+          # an artifact that no longer exists. Name both halves of what went in.
+          sha_tag="sha-${GITHUB_SHA}-hive-${hive_commit}"
+          # Aliases only: the build tag itself is pushed once below, with the
+          # digestfile, so listing it here too would push the same index twice.
+          tags=""
           stable=false
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             # Release build: publish the immutable version tag and update stable pointer
             release=true
             tags="${tags} ${version} stable testing"
             stable=true
-          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
-            # Push to main: update moving pointers only; do not consume immutable version tag
+          elif [[ "${GITHUB_REF}" == refs/heads/main || "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            # Push to main or daily scheduled rebuild: update moving pointers only; do not consume immutable version tag
             tags="${tags} stable testing"
             stable=true
           fi
@@ -159,9 +177,11 @@ jobs:
             echo "version=${version}"
             echo "base_name=${base_name}"
             echo "base_digest=${base_digest}"
+            echo "hive_commit=${hive_commit}"
             echo "stable=${stable}"
             echo "release=${release}"
             echo "tags=${tags}"
+            echo "sha_tag=${sha_tag}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Refuse to republish an existing version tag
@@ -177,6 +197,7 @@ jobs:
             exit 1
           fi
           echo "${IMAGE}:${VERSION} is free"
+
   build:
     needs: metadata
     strategy:
@@ -214,12 +235,19 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
+          HIVE_COMMIT: ${{ needs.metadata.outputs.hive_commit }}
         run: |
           set -euo pipefail
+          # One Hive commit for the whole run, resolved in the metadata job.
+          # Passing it in (rather than resolving inside the build) is also what
+          # moves the layer cache key when upstream moves, so the daily rebuild
+          # actually refetches instead of reusing an earlier layer.
+          echo "building with Hive ${HIVE_COMMIT}"
           podman build \
             --format oci \
             --build-arg CONTRIBUTE_VERSION="${VERSION}" \
             --build-arg CONTRIBUTE_REVISION="${GITHUB_SHA}" \
+            --build-arg HIVE_COMMIT="${HIVE_COMMIT}" \
             --label "org.opencontainers.image.created=${CREATED}" \
             --label "org.opencontainers.image.base.name=${BASE_NAME}" \
             --label "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
@@ -259,13 +287,14 @@ jobs:
         shell: bash
         env:
           ARCH: ${{ matrix.arch }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
           # Staged in this repository's own namespace: a fork proves the image
           # with its own token, and only the guarded publish job turns these
           # digests into ':stable'.
-          staging="ghcr.io/${GITHUB_REPOSITORY,,}-contribute"
-          target="${staging}:sha-${GITHUB_SHA}-${ARCH}"
+          staging="ghcr.io/${GITHUB_REPOSITORY,,}-staging"
+          target="${staging}:${SHA_TAG}-${ARCH}"
           podman push --format oci --authfile "${RUNNER_TEMP}/ghcr-auth.json" \
             --digestfile "${RUNNER_TEMP}/digest-${ARCH}.txt" \
             contribute:smoke "docker://${target}"
@@ -315,7 +344,7 @@ jobs:
   publish:
     needs: [metadata, build]
     # Only the canonical repository turns proven digests into published tags.
-    if: github.repository == 'projectbluefin/review'
+    if: github.repository == 'projectbluefin/contribute'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -359,9 +388,10 @@ jobs:
           BASE_NAME: ${{ needs.metadata.outputs.base_name }}
           BASE_DIGEST: ${{ needs.metadata.outputs.base_digest }}
           TAGS: ${{ needs.metadata.outputs.tags }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
-          staging="ghcr.io/${GITHUB_REPOSITORY,,}-contribute"
+          staging="ghcr.io/${GITHUB_REPOSITORY,,}-staging"
           amd64="$(cat "${RUNNER_TEMP}/digests/digest-amd64.txt")"
           arm64="$(cat "${RUNNER_TEMP}/digests/digest-arm64.txt")"
           for digest in "$amd64" "$arm64"; do
@@ -381,7 +411,7 @@ jobs:
           buildah manifest add contribute:index docker://${staging}@${amd64}
           buildah manifest add contribute:index docker://${staging}@${arm64}
           for annotation in \
-            "org.opencontainers.image.title=Bluefin Contribute" \
+            "org.opencontainers.image.title=Hive Contribute" \
             "org.opencontainers.image.description=Distroless OMP contributor runtime for Hive-assigned work." \
             "org.opencontainers.image.url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
             "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
@@ -391,13 +421,13 @@ jobs:
             "org.opencontainers.image.licenses=Apache-2.0" \
             "org.opencontainers.image.base.name=${BASE_NAME}" \
             "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
-            "io.projectbluefin.contribute=true"; do
+            "io.hivecommons.contribute=true"; do
             buildah manifest annotate --index --annotation "\$annotation" contribute:index
           done
           for tag in ${TAGS}; do
             buildah manifest push --all --format oci contribute:index "docker://${IMAGE}:\${tag}"
           done
-          buildah manifest push --all --format oci --digestfile /tmp/index-digest contribute:index "docker://${IMAGE}:sha-${GITHUB_SHA}"
+          buildah manifest push --all --format oci --digestfile /tmp/index-digest contribute:index "docker://${IMAGE}:${SHA_TAG}"
           cat /tmp/index-digest
           EOF
           digest="$(podman run --rm \
@@ -423,12 +453,13 @@ jobs:
           VERSION: ${{ needs.metadata.outputs.version }}
           STABLE: ${{ needs.metadata.outputs.stable }}
           DIGEST: ${{ steps.publish.outputs.digest }}
+          SHA_TAG: ${{ needs.metadata.outputs.sha_tag }}
         run: |
           set -euo pipefail
           {
-            echo "## Bluefin Contribute"
+            echo "## Hive Contribute"
             echo
             echo "Index digest: \`${DIGEST}\`"
-            echo "Immutable tag: \`${IMAGE}:sha-${GITHUB_SHA}\`"
+            echo "Build tag: \`${IMAGE}:${SHA_TAG}\`"
             [[ "$STABLE" == true ]] && echo "Stable alias: \`${IMAGE}:stable\`"
           } >> "$GITHUB_STEP_SUMMARY"

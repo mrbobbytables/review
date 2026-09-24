@@ -92,13 +92,10 @@ test("updateGhContainerfile replaces exactly one complete GH pin set", () => {
 		/expected one ARG GH_VERSION pin/,
 	);
 });
-
-test("syncGhPins updates both shipped images atomically", async (t) => {
+test("syncGhPins updates contributor image atomically", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "gh-pins-"));
 	t.after(() => rm(root, { recursive: true, force: true }));
-	await mkdir(join(root, "image/appliance"), { recursive: true });
 	await mkdir(join(root, "image/contribute"), { recursive: true });
-	await writeFile(join(root, "image/appliance/Containerfile"), RENOVATED_GH_CONTAINERFILE);
 	await writeFile(join(root, "image/contribute/Containerfile"), RENOVATED_GH_CONTAINERFILE);
 
 	const urls = [];
@@ -112,12 +109,10 @@ test("syncGhPins updates both shipped images atomically", async (t) => {
 
 	assert.equal(pins.version, "2.97.0");
 	assert.deepEqual(urls, ["https://api.github.com/repos/cli/cli/releases/tags/v2.97.0"]);
-	const appliance = await readFile(join(root, "image/appliance/Containerfile"), "utf8");
 	const contribute = await readFile(join(root, "image/contribute/Containerfile"), "utf8");
-	assert.equal(appliance, contribute);
-	assert.match(appliance, /^ARG GH_VERSION=2\.97\.0$/m);
-	assert.match(appliance, new RegExp(`^ARG GH_X86_64_SHA256=${X64}$`, "m"));
-	assert.match(appliance, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
+	assert.match(contribute, /^ARG GH_VERSION=2\.97\.0$/m);
+	assert.match(contribute, new RegExp(`^ARG GH_X86_64_SHA256=${X64}$`, "m"));
+	assert.match(contribute, new RegExp(`^ARG GH_AARCH64_SHA256=${ARM64}$`, "m"));
 });
 
 // --------------------------------------------------------------------------
@@ -290,6 +285,55 @@ foo==1.0.0 \\
 	assert.match(updated, /^    # via bar$/m);
 });
 
+test("updateLockfileContent keeps extras and environment markers, and refuses unparseable lines", async () => {
+	const hashPayload = response({
+		urls: [{ digests: { sha256: X64 } }, { digests: { sha256: ARM64 } }],
+	});
+	const lookups = [];
+	const fetchImpl = async (url) => {
+		lookups.push(String(url));
+		return hashPayload;
+	};
+
+	// An extras requirement does not start with `name==`, so a splitter that
+	// only recognises that shape folds it into the previous package's block and
+	// drops the package, its hashes, and nothing else says so.
+	const withExtras = `# Header
+foo==1.0.0 \\
+    --hash=sha256:${"1".repeat(64)}
+    # via bar
+coverage[toml]==7.6.0 \\
+    --hash=sha256:${"2".repeat(64)}
+    # via pytest-cov
+`;
+	const extrasUpdated = await updateLockfileContent(withExtras, fetchImpl);
+	assert.match(extrasUpdated, /^coverage\[toml\]==7\.6\.0 \\$/m);
+	assert.match(extrasUpdated, /^    # via pytest-cov$/m);
+	// PyPI is queried for the project, not for the extras selector.
+	assert.ok(lookups.some((url) => url.includes("/pypi/coverage/7.6.0/json")));
+
+	// The marker decides whether the package installs at all, so re-emitting
+	// the requirement without it silently changes what CI installs.
+	const withMarker = `# Header
+tomli==2.0.1 ; python_version < "3.11" \\
+    --hash=sha256:${"3".repeat(64)}
+    # via pytest
+`;
+	const markerUpdated = await updateLockfileContent(withMarker, fetchImpl);
+	assert.match(markerUpdated, /^tomli==2\.0\.1 ; python_version < "3\.11" \\$/m);
+
+	// Anything this cannot parse must stop the rewrite rather than be omitted
+	// from it.
+	await assert.rejects(
+		() =>
+			updateLockfileContent(
+				`# Header\nfoo==1.0.0 unexpected-token \\\n    --hash=sha256:${"4".repeat(64)}\n`,
+				fetchImpl,
+			),
+		/cannot parse requirement line/,
+	);
+});
+
 // --------------------------------------------------------------------------
 // Renovate configuration & workflow contracts
 // --------------------------------------------------------------------------
@@ -323,11 +367,9 @@ test("Renovate configuration tracks GH, Node, tmux, and requirements-ci with pos
 	const ghRule = config.packageRules.find((r) => r.matchPackageNames?.includes("cli/cli"));
 	assert.ok(ghRule, "GH needs a packageRule with postUpgradeTasks");
 	assert.deepEqual(ghRule.postUpgradeTasks.commands, ["node scripts/update-gh-pins.mjs"]);
-	assert.deepEqual(ghRule.postUpgradeTasks.fileFilters.sort(), [
-		"image/appliance/Containerfile",
+	assert.deepEqual(ghRule.postUpgradeTasks.fileFilters, [
 		"image/contribute/Containerfile",
 	]);
-
 	const nodeRule = config.packageRules.find((r) => r.matchPackageNames?.includes("node"));
 	assert.ok(nodeRule, "Node needs a packageRule with postUpgradeTasks");
 	assert.deepEqual(nodeRule.postUpgradeTasks.commands, ["node scripts/update-node-pins.mjs"]);
@@ -343,16 +385,6 @@ test("Renovate configuration tracks GH, Node, tmux, and requirements-ci with pos
 	assert.deepEqual(pypiRule.postUpgradeTasks.commands, ["node scripts/update-requirements-ci-hashes.mjs"]);
 	assert.deepEqual(pypiRule.postUpgradeTasks.fileFilters, ["requirements-ci.lock"]);
 
-	// Both images must ship identical GH pins
-	const getGhPins = async (path) => (await readFile(path, "utf8"))
-		.split("\n")
-		.filter((line) => /^ARG GH_(?:VERSION|X86_64_SHA256|AARCH64_SHA256)=/.test(line));
-	assert.deepEqual(
-		await getGhPins("image/appliance/Containerfile"),
-		await getGhPins("image/contribute/Containerfile"),
-		"review and contributor images must ship the same GH release",
-	);
-
 	// Check Renovate workflow allows all update commands
 	const renovateWorkflow = await readFile(".github/workflows/renovate.yml", "utf8");
 	assert.match(renovateWorkflow, /update-omp-pins/);
@@ -361,48 +393,48 @@ test("Renovate configuration tracks GH, Node, tmux, and requirements-ci with pos
 	assert.match(renovateWorkflow, /update-tmux-pins/);
 	assert.match(renovateWorkflow, /update-requirements-ci-hashes/);
 
-	for (const path of [".github/workflows/publish-appliance.yml", ".github/workflows/publish-contribute.yml"]) {
-		const workflow = await readFile(path, "utf8");
-		assert.match(workflow, /push:\n    branches:\n      - main/);
-		assert.match(workflow, /node --test tests\/update-derived-pins\.test\.mjs/);
-	}
+	const workflow = await readFile(".github/workflows/publish-contribute.yml", "utf8");
+	assert.match(workflow, /push:\n    branches:\n      - main/);
+	assert.match(workflow, /node --test tests\/update-derived-pins\.test\.mjs/);
 });
 
 // --------------------------------------------------------------------------
 // Dependency extraction contract
 // --------------------------------------------------------------------------
 
-test("Renovate custom regex managers extract GH, Node, and tmux from Containerfiles", async () => {
+// This asserts that each manager still EXTRACTS the pin, never what the pin
+// happens to be today. Asserting the current version here made every correct
+// Renovate bump fail CI, and because these updates automerge only after checks
+// pass, a red check is indistinguishable from a rejected update: the branch
+// sits, the pin ages, and the test that was supposed to protect the pin is
+// what stopped it from ever moving.
+test("Renovate custom regex managers extract GH, Node, and tmux from Containerfile", async () => {
 	const config = JSON.parse(await readFile("renovate.json", "utf8"));
-	const appliance = await readFile("image/appliance/Containerfile", "utf8");
 	const contribute = await readFile("image/contribute/Containerfile", "utf8");
 
-	// Test extraction against Containerfiles
-	const ghManager = config.customManagers.find((m) => m.depNameTemplate === "cli/cli");
-	const ghRegex = new RegExp(ghManager.matchStrings[0], "m");
-	const applianceGhMatch = ghRegex.exec(appliance);
-	assert.ok(applianceGhMatch, "GH extracted from image/appliance/Containerfile");
-	assert.equal(applianceGhMatch.groups.currentValue, "2.97.0");
-	const contributeGhMatch = ghRegex.exec(contribute);
-	assert.ok(contributeGhMatch, "GH extracted from image/contribute/Containerfile");
-	assert.equal(contributeGhMatch.groups.currentValue, "2.97.0");
+	const pinnedArg = (arg) => {
+		const match = new RegExp(`^ARG ${arg}=(.*)$`, "m").exec(contribute);
+		assert.ok(match, `image/contribute/Containerfile has no ARG ${arg}`);
+		return match[1];
+	};
+	const extracted = (depName) => {
+		const manager = config.customManagers.find((m) => m.depNameTemplate === depName);
+		assert.ok(manager, `no custom manager tracks ${depName}`);
+		const match = new RegExp(manager.matchStrings[0], "m").exec(contribute);
+		assert.ok(match, `${depName} extracted from image/contribute/Containerfile`);
+		return match.groups.currentValue;
+	};
 
-	const nodeManager = config.customManagers.find((m) => m.depNameTemplate === "node");
-	const nodeRegex = new RegExp(nodeManager.matchStrings[0], "m");
-	const contributeNodeMatch = nodeRegex.exec(contribute);
-	assert.ok(contributeNodeMatch, "Node extracted from image/contribute/Containerfile");
-	assert.equal(contributeNodeMatch.groups.currentValue, "24.18.1");
-
-	const tmuxManager = config.customManagers.find((m) => m.depNameTemplate === "tmux/tmux-builds");
-	const tmuxRegex = new RegExp(tmuxManager.matchStrings[0], "m");
-	const contributeTmuxMatch = tmuxRegex.exec(contribute);
-	assert.ok(contributeTmuxMatch, "tmux extracted from image/contribute/Containerfile");
-	assert.equal(contributeTmuxMatch.groups.currentValue, "3.7b");
+	assert.equal(extracted("cli/cli"), pinnedArg("GH_VERSION"));
+	assert.equal(extracted("node"), pinnedArg("NODE_VERSION"));
+	assert.equal(extracted("tmux/tmux-builds"), pinnedArg("TMUX_VERSION"));
 
 	const pypiManager = config.customManagers.find((m) => m.datasourceTemplate === "pypi");
 	const pypiRegex = new RegExp(pypiManager.matchStrings[0], "gm");
 	const lockfile = await readFile("requirements-ci.lock", "utf8");
 	const pypiMatches = [...lockfile.matchAll(pypiRegex)];
 	assert.ok(pypiMatches.length >= 10, "requirements-ci.lock packages extracted");
-	assert.ok(pypiMatches.some((m) => m.groups.depName === "pre-commit" && m.groups.currentValue === "4.6.2"));
+	const preCommit = pypiMatches.find((m) => m.groups.depName === "pre-commit");
+	assert.ok(preCommit, "pre-commit extracted from requirements-ci.lock");
+	assert.match(preCommit.groups.currentValue, /^\d+\.\d+(\.\d+)?$/);
 });

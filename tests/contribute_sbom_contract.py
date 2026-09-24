@@ -40,6 +40,7 @@ SAMPLE_HIVE_COMMIT = "928e81d846a9c12e0d46da168f868e4a97319718"
 BASE_ARGS = {
     "--version": "26.08.01",
     "--revision": "fd4437560fb87eae4707070b224ab1901ab6f0c6",
+    "--arch": "x86_64",
     "--hive-commit": SAMPLE_HIVE_COMMIT,
     "--omp-version": "18.1.18",
     "--omp-sha256": SAMPLE_SHA256,
@@ -89,10 +90,11 @@ class DocumentEnvelopeContract(unittest.TestCase):
         self.assertEqual(doc["spdxVersion"], "SPDX-2.3")
         self.assertEqual(doc["dataLicense"], "CC0-1.0")
         self.assertEqual(doc["SPDXID"], "SPDXRef-DOCUMENT")
-        self.assertEqual(doc["name"], "bluefin-contribute")
+        self.assertEqual(doc["name"], "hive-contribute")
         self.assertEqual(
             doc["documentNamespace"],
-            f"https://projectbluefin.org/spdx/contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}",
+            f"https://hivecommons.org/spdx/hive-contribute/{BASE_ARGS['--version']}/{BASE_ARGS['--revision']}"
+            f"/{BASE_ARGS['--hive-commit']}/{BASE_ARGS['--arch']}",
         )
 
     def test_creation_info(self):
@@ -152,7 +154,7 @@ class PackageMetadataContract(unittest.TestCase):
         )
         self.assertEqual(
             pkgs["hive-contributor-runtime"]["downloadLocation"],
-            f"https://github.com/hivecommons/hive/tree/{BASE_ARGS['--hive-commit']}/bin",
+            f"https://github.com/hivecommons/hive/tree/{BASE_ARGS['--hive-commit']}",
         )
 
     def test_package_license_and_copyright_fields(self):
@@ -182,6 +184,82 @@ class PackageMetadataContract(unittest.TestCase):
         # Packages without archive checksums
         self.assertNotIn("checksums", pkgs["ws"])
         self.assertNotIn("checksums", pkgs["hive-contributor-runtime"])
+
+    def test_every_package_declares_a_package_manager_purl(self):
+        """syft's sbom-cataloger keeps externalRefs and drops the rest.
+
+        A package with no purl locator reaches the published attestation
+        without an identity a scanner can match, so the pinned component is
+        invisible to vulnerability matching through the image's own SBOM.
+        """
+        for pkg in generate(self)["packages"]:
+            with self.subTest(package=pkg["name"]):
+                refs = pkg.get("externalRefs")
+                self.assertTrue(refs, f"{pkg['name']} declares no externalRefs")
+                reference = refs[0]
+                self.assertEqual(reference["referenceCategory"], "PACKAGE-MANAGER")
+                self.assertEqual(reference["referenceType"], "purl")
+                self.assertTrue(
+                    reference["referenceLocator"].startswith("pkg:"),
+                    f"{pkg['name']} locator is not a purl: "
+                    f"{reference['referenceLocator']!r}",
+                )
+
+    def test_purls_carry_the_verified_digest_as_a_checksum_qualifier(self):
+        """The SPDX ``checksums`` block does not survive the syft merge.
+
+        The qualifier is the only place a verified digest reaches the
+        attestation, so every component the build verifies must carry it.
+        """
+        pkgs = packages_by_name(generate(self))
+
+        def locator(name: str) -> str:
+            return pkgs[name]["externalRefs"][0]["referenceLocator"]
+
+        self.assertEqual(
+            locator("omp"),
+            f"pkg:github/can1357/oh-my-pi@v{BASE_ARGS['--omp-version']}"
+            f"?checksum=sha256:{BASE_ARGS['--omp-sha256']}",
+        )
+        self.assertEqual(
+            locator("node"),
+            f"pkg:generic/node@{BASE_ARGS['--node-version']}"
+            f"?checksum=sha256:{BASE_ARGS['--node-sha256']}",
+        )
+        self.assertEqual(
+            locator("gh"),
+            f"pkg:github/cli/cli@v{BASE_ARGS['--gh-version']}"
+            f"?checksum=sha256:{BASE_ARGS['--gh-sha256']}",
+        )
+        self.assertEqual(
+            locator("tmux"),
+            f"pkg:github/tmux/tmux-builds@v{BASE_ARGS['--tmux-version']}"
+            f"?checksum=sha256:{BASE_ARGS['--tmux-sha256']}",
+        )
+
+    def test_unverified_components_carry_a_bare_purl(self):
+        """No digest is verified for these two, so none may be claimed."""
+        pkgs = packages_by_name(generate(self))
+
+        def locator(name: str) -> str:
+            return pkgs[name]["externalRefs"][0]["referenceLocator"]
+
+        self.assertEqual(locator("ws"), f"pkg:npm/ws@{BASE_ARGS['--ws-version']}")
+        self.assertEqual(
+            locator("hive-contributor-runtime"),
+            f"pkg:github/hivecommons/hive@{BASE_ARGS['--hive-commit']}",
+        )
+        for name in ("ws", "hive-contributor-runtime"):
+            with self.subTest(package=name):
+                self.assertNotIn("checksum=", locator(name))
+
+    def test_purl_version_tracks_the_argument(self):
+        """A bare-substring purl check would pass on a hardcoded version."""
+        pkgs = packages_by_name(generate(self, **{"--gh-version": "9.9.9"}))
+        self.assertEqual(
+            pkgs["gh"]["externalRefs"][0]["referenceLocator"],
+            f"pkg:github/cli/cli@v9.9.9?checksum=sha256:{BASE_ARGS['--gh-sha256']}",
+        )
 
 
 class InputValidationContract(unittest.TestCase):
@@ -234,6 +312,17 @@ class InputValidationContract(unittest.TestCase):
             "hive commit must be a full lowercase SHA",
             **{"--hive-commit": "G" * 40},
         )
+
+    def test_invalid_arch_rejected(self):
+        for bad in ("x86_64/extra", "x86 64", ""):
+            self.assert_rejected("arch must be a bare identifier", **{"--arch": bad})
+
+    def test_namespace_differs_per_architecture(self):
+        # Two architectures ship different binary checksums; SPDX requires each
+        # document to carry its own namespace.
+        first = generate(self, **{"--arch": "x86_64"})
+        second = generate(self, **{"--arch": "aarch64"})
+        self.assertNotEqual(first["documentNamespace"], second["documentNamespace"])
 
     def test_missing_required_flag_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:

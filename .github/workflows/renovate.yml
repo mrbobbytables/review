@@ -11,7 +11,7 @@ name: Renovate
 #
 # Daily polling follows stable OMP GitHub releases. The repository package rule
 # runs one allowlisted pin synchronizer, then OMP-only automerge lets the main
-# push trigger both native image publishers.
+# push trigger the native image publisher.
 
 on:
   schedule:
@@ -52,7 +52,94 @@ jobs:
           configurationFile: renovate.json
           token: ${{ steps.app-token.outputs.token }}
         env:
-          LOG_LEVEL: ${{ inputs.dry_run == true && 'debug' || 'info' }}
+          # Debug permanently, not as a dry-run nicety. Renovate logs
+          # post-upgrade command compilation, execution, and which of the
+          # resulting file changes survived `fileFilters` only at debug; at
+          # info a synchronizer that failed is indistinguishable from one that
+          # had nothing to do. That is how a stale digest sync read as a
+          # successful no-op run after run. One scheduled run a day makes the
+          # verbosity cheap. From #639 (@Danathar).
+          LOG_LEVEL: debug
           RENOVATE_DRY_RUN: ${{ inputs.dry_run == true && 'full' || '' }}
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ALLOWED_COMMANDS: '["^node scripts/update-omp-pins\\.mjs$", "^node scripts/update-gh-pins\\.mjs$", "^node scripts/update-node-pins\\.mjs$", "^node scripts/update-tmux-pins\\.mjs$", "^node scripts/update-requirements-ci-hashes\\.mjs$"]'
+          # A post-upgrade command does NOT inherit this job's environment.
+          # Renovate builds that environment from its own allowlist (proxy,
+          # HOME, PATH, locale, CA certificates, container runtime) unless the
+          # self-hosted `exposeAllEnv` is set, which it is not. So every pin
+          # synchronizer read api.github.com anonymously — 60 requests an hour
+          # against the runner's shared egress address — and a rate-limited
+          # lookup leaves the version bumped beside the PREVIOUS release's
+          # digests. Hand them the app token explicitly instead of opening the
+          # whole environment; Renovate redacts this value from its logs.
+          # Diagnosis and fix from #639 (@Danathar).
+          RENOVATE_CUSTOM_ENV_VARIABLES: '{"GH_TOKEN": "${{ steps.app-token.outputs.token }}"}'
+
+      # Renovate reported success for a week while the shipped OMP fell five
+      # releases behind: it resolved every release and pushed each onto
+      # renovate/omp-runtime, but PR creation is rate-limited and that branch
+      # never reached the front of the queue. Nothing failed, so nothing said
+      # so. This step is what says so.
+      - name: Shipped pins are being delivered
+        if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Read the pin from remote main, not this checkout: automerge can
+          # land an update while this workflow is still running, and a stale
+          # local copy would report a delivery failure that already shipped.
+          pinned() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/image/contribute/Containerfile?ref=main" \
+              --jq .content | base64 -d | sed -nE "s/^ARG ${1}=(.*)\$/\1/p"
+          }
+          # The pin on a specific ref, used to ask what an in-flight branch
+          # actually carries.
+          pin_on() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/image/contribute/Containerfile?ref=$1" \
+              --jq .content 2>/dev/null | base64 -d | sed -nE "s/^ARG ${2}=(.*)\$/\1/p"
+          }
+          stalled=0
+          check() {
+            local name="$1" arg="$2" latest="$3" branch="$4" current open carries
+            current="$(pinned "$arg")"
+            [ "$current" = "$latest" ] && { echo "✓ ${name} ${current} is current"; return 0; }
+            # An OPEN PULL REQUEST CARRYING THE LATEST RELEASE. Each weaker
+            # test has already failed here: a branch check passes while
+            # Renovate pushes release after release and opens no pull request,
+            # and an open-pull-request check passes while a blocked one sits on
+            # an older version and masks everything published since.
+            open="$(gh pr list --repo "${GITHUB_REPOSITORY}" --head "$branch" --state open --json number --jq 'length')"
+            # `|| true`: a missing branch makes this pipeline exit non-zero, and
+            # under `set -e` that would kill the step before the diagnostic below
+            # ever printed — reporting nothing, and skipping every later pin.
+            carries="$(pin_on "$branch" "$arg" || true)"
+            if [ "$open" -gt 0 ] && [ "$carries" = "$latest" ]; then
+              echo "… ${name} ${current} -> ${latest} in flight, pull request open on ${branch}"
+              return 0
+            fi
+            if [ "$open" -gt 0 ]; then
+              echo "✗ ${name} ${current} is behind ${latest}: the open pull request on ${branch} carries ${carries:-nothing}" >&2
+            elif gh api "repos/${GITHUB_REPOSITORY}/branches/${branch}" --silent >/dev/null 2>&1; then
+              echo "✗ ${name} ${current} is behind ${latest}: ${branch} exists but has no open pull request" >&2
+            else
+              echo "✗ ${name} ${current} is behind ${latest} and no ${branch} carries the update" >&2
+            fi
+            stalled=1
+          }
+          release() { gh api "repos/$1/releases/latest" --jq .tag_name | sed 's/^v//'; }
+          check OMP OMP_VERSION "$(release can1357/oh-my-pi)" renovate/omp-runtime
+          check "GitHub CLI" GH_VERSION "$(release cli/cli)" renovate/github-cli-runtime
+          check tmux TMUX_VERSION "$(release tmux/tmux-builds)" renovate/tmux-runtime
+          # Within the pinned major on purpose: a new major going LTS is a
+          # deliberate decision, not a delivery failure, and must not turn this
+          # guard red every day until someone takes it.
+          node_major="$(pinned NODE_VERSION | cut -d. -f1)"
+          check Node NODE_VERSION \
+            "$(curl -fsS --max-time 30 https://nodejs.org/dist/index.json |
+                jq -r --arg m "v${node_major}." '[.[] | select(.version | startswith($m))][0].version' | sed 's/^v//')" \
+            renovate/node.js-runtime
+          if [ "$stalled" -ne 0 ]; then
+            echo "::error::a shipped runtime pin is behind upstream with no pull request delivering it" >&2
+            exit 1
+          fi
